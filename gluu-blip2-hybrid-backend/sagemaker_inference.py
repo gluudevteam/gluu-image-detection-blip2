@@ -1,5 +1,5 @@
-# sagemaker_inference.py
-import boto3, json, logging, os, io
+# sagemaker_inference.py (Async SageMaker version)
+import boto3, json, logging, os, io, time
 from PIL import Image
 from typing import List
 
@@ -14,18 +14,20 @@ try:
 except Exception:
     _LOCAL_AVAILABLE = False
 
+
 def local_blip_available() -> bool:
     return _LOCAL_AVAILABLE and torch.cuda.is_available() or _LOCAL_AVAILABLE
 
-# helper to make a textual prompt we will send to SageMaker
+
+# Helper to make a textual prompt for SageMaker
 def build_classification_prompt(candidate_labels: List[str], label_type: str) -> str:
-    # instruct BLIP2 to answer whether each label applies; model should answer in plain text
     labels_joined = ", ".join(candidate_labels)
     prompt = (
         f"Given the image, choose the best {label_type} from: {labels_joined}. "
         f"Answer with a single label only."
     )
     return prompt
+
 
 def build_tags_prompt(product_type: str, tags: List[str]) -> str:
     joined = ", ".join(tags)
@@ -35,75 +37,80 @@ def build_tags_prompt(product_type: str, tags: List[str]) -> str:
     )
     return prompt
 
-def invoke_sagemaker_for_prompt(image: Image.Image, prompt: str, endpoint_name: str, region_name: str):
+
+# --- Async SageMaker Invocation ---
+def invoke_sagemaker_async(image: Image.Image, prompt: str, endpoint_name: str, region_name: str,
+                           input_bucket: str, output_bucket: str, prefix: str = "async-jobs") -> str:
     """
-    Invoke the SageMaker real-time endpoint with a prompt and image.
-    The endpoint is expected to accept binary image body and `x-prompt` header or accept multipart JSON;
-    here we send raw image bytes and include prompt in 'X-Amzn-SageMaker-Custom-Attributes' header if supported.
-    Implementation may vary depending on your SageMaker container signature — adjust as needed.
-    
-    The invoke_sagemaker_for_prompt uses CustomAttributes to pass the prompt (some SageMaker containers accept it); 
-    adjust this to match your SageMaker endpoint contract. If your SageMaker wrapper expects a JSON payload with 
-    "inputs": {image: ..., "prompt": "..."}, modify invoke_sagemaker_for_prompt to send JSON 
-    (e.g., multipart/form-data or application/json) per your container.
+    Submit an asynchronous inference job to SageMaker.
+    The image is uploaded to S3, and SageMaker writes output to an S3 output location.
+    Returns the output S3 URI where the prediction will be written.
     """
-    client = boto3.client("sagemaker-runtime", region_name=region_name)
+    s3 = boto3.client("s3", region_name=region_name)
+    sm = boto3.client("sagemaker-runtime", region_name=region_name)
+
+    # Save image to S3 for async processing
     buf = io.BytesIO()
     image.save(buf, format="JPEG")
-    image_bytes = buf.getvalue()
+    buf.seek(0)
 
-    # many Hugging Face / custom endpoints take just image bytes and prompt in 'ContentType' or 'X-Amzn-...'
-    # We'll use a simple approach: send prompt in 'X-Amzn-SageMaker-Custom-Attributes' header.
-    response = client.invoke_endpoint(
+    input_key = f"{prefix}/inputs/{int(time.time())}.jpg"
+    s3.upload_fileobj(buf, input_bucket, input_key)
+    input_s3_uri = f"s3://{input_bucket}/{input_key}"
+
+    logger.info(f"[invoke_sagemaker_async] Uploaded image to {input_s3_uri}")
+
+    # Submit asynchronous request
+    response = sm.invoke_endpoint_async(
         EndpointName=endpoint_name,
-        ContentType="application/x-image",
-        Body=image_bytes,
-        CustomAttributes=prompt   # some endpoints support this; if not, change to your endpoint contract
+        InputLocation=input_s3_uri,
+        CustomAttributes=prompt,
+        OutputLocation=f"s3://{output_bucket}/{prefix}/outputs/"
     )
-    # response['Body'] is a streaming body
-    result = response['Body'].read().decode('utf-8')
-    return result
 
-# Public helpers used by app.py
-def classify_with_sagemaker(image, candidates: List[str], endpoint_name: str, region_name: str, use_local=False):
+    output_uri = response.get("OutputLocation", f"s3://{output_bucket}/{prefix}/outputs/")
+    logger.info(f"[invoke_sagemaker_async] Async job submitted. Output will appear at {output_uri}")
+    return output_uri
+
+
+# --- Public helpers used by app.py ---
+def classify_with_sagemaker(image, candidates: List[str], endpoint_name: str,
+                            region_name: str, input_bucket: str, output_bucket: str, use_local=False):
     """
     Return a single label string from candidates.
-    If use_local=True attempt to run local BLIP2 model (fallback).
+    For async SageMaker inference, returns the output S3 URI for monitoring.
+    If use_local=True, attempt to run local BLIP2 model (fallback).
     """
     if use_local and local_blip_available():
-        # local inference path
         return _local_classify(image, candidates)
-    prompt = build_classification_prompt(candidates, label_type=("type" if len(candidates)>0 else "label"))
-    raw = invoke_sagemaker_for_prompt(image, prompt, endpoint_name, region_name)
-    # raw may be free-form; try to match to candidate labels (case-insensitive)
-    lower = raw.lower()
-    for c in candidates:
-        if c.lower() in lower:
-            return c
-    # fallback: return first candidate or 'Unknown'
-    return candidates[0] if candidates else "Unknown"
 
-def extract_tags_with_sagemaker(image, product_type: str, endpoint_name: str, region_name: str, use_local=False):
+    prompt = build_classification_prompt(candidates, label_type=("type" if len(candidates) > 0 else "label"))
+    output_uri = invoke_sagemaker_async(image, prompt, endpoint_name, region_name, input_bucket, output_bucket)
+    logger.info(f"[classify_with_sagemaker] Async inference initiated for classification.")
+    return output_uri
+
+
+def extract_tags_with_sagemaker(image, product_type: str, endpoint_name: str,
+                                region_name: str, input_bucket: str, output_bucket: str, use_local=False):
     """
     Return a list of selected tags (subset of PRODUCT_TAGS[product_type])
+    For async SageMaker inference, returns the output S3 URI for monitoring.
     """
     from tag_logic import PRODUCT_TAGS
     tags = PRODUCT_TAGS.get(product_type, [])
     if not tags:
         return []
+
     if use_local and local_blip_available():
         return _local_extract_tags(image, product_type)
-    prompt = build_tags_prompt(product_type, tags)
-    raw = invoke_sagemaker_for_prompt(image, prompt, endpoint_name, region_name)
-    # raw should contain comma separated tags; parse defensively
-    raw_lower = raw.lower()
-    selected = []
-    for t in tags:
-        if t.lower() in raw_lower:
-            selected.append(t)
-    return selected
 
-# --- Local BLIP2 fallback implementations (only used if LOCAL_BLIP2 true and transformer libs installed) ---
+    prompt = build_tags_prompt(product_type, tags)
+    output_uri = invoke_sagemaker_async(image, prompt, endpoint_name, region_name, input_bucket, output_bucket)
+    logger.info(f"[extract_tags_with_sagemaker] Async inference initiated for tag extraction.")
+    return output_uri
+
+
+# --- Local BLIP2 fallback implementations (unchanged) ---
 def _load_local_blip():
     global _local_processor, _local_model
     if not _LOCAL_AVAILABLE:
@@ -122,6 +129,7 @@ def _load_local_blip():
     except Exception as e:
         raise RuntimeError(f"Failed to load local BLIP2: {e}")
 
+
 def _local_classify(image: Image.Image, candidates: List[str]) -> str:
     if '_local_model' not in globals():
         _load_local_blip()
@@ -134,6 +142,7 @@ def _local_classify(image: Image.Image, candidates: List[str]) -> str:
         if any(w in answer for w in ["yes", "definitely", "clearly"]):
             return c
     return candidates[0] if candidates else "Unknown"
+
 
 def _local_extract_tags(image: Image.Image, product_type: str) -> List[str]:
     if '_local_model' not in globals():
