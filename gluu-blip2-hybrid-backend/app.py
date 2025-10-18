@@ -3,91 +3,77 @@
 # GLUU Hybrid FastAPI Backend - BLIP2 Core Logic & Product Report API
 # ============================================================
 
+import os, io, time, json, logging
+from typing import List
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
 from pydantic import BaseModel
 from PIL import Image
-import time
-import io
-import os
-import logging
+from dotenv import load_dotenv
+import boto3
 
+# Load environment variables
+load_dotenv()
+
+# Import local inference helpers
 from sagemaker_inference import (
     classify_with_sagemaker,
     extract_tags_with_sagemaker,
     local_blip_available
 )
-from tag_logic import (
-    OBJECT_LABELS,
-    MATERIAL_LABELS,
-    map_condition_to_score
-)
-from summarizer import summarize_result
+from tag_logic import PRODUCT_TAGS
 
-# ------------------------------------------------------------
-# App Setup
-# ------------------------------------------------------------
-app = FastAPI(title="GLUU BLIP2 Hybrid Inference API")
+# FastAPI setup
+app = FastAPI(title="GLUU BLIP2 Async Inference API", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[os.getenv("ALLOWED_ORIGINS", "*")],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
-# ------------------------------------------------------------
-# Logging Configuration
-# ------------------------------------------------------------
+# Logging setup
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("gluu-blip2-backend")
+logger = logging.getLogger("gluu-blip2")
 
-# ------------------------------------------------------------
-# Response Model
-# ------------------------------------------------------------
-class ReportResponse(BaseModel):
+# Environment variables
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+SAGEMAKER_ENDPOINT = os.getenv("SAGEMAKER_ENDPOINT_NAME", "")
+S3_INPUT_BUCKET = os.getenv("S3_INPUT_BUCKET", "")
+S3_OUTPUT_BUCKET = os.getenv("S3_OUTPUT_BUCKET", "")
+
+# Classes and tags
+OBJECT_LABELS = ["Shoe", "Watch", "Wallet", "Bag", "Purse", "Glasses", "Hat", "Phone", "Jacket", "Belt"]
+MATERIAL_LABELS = ["Leather", "Canvas", "Suede", "Synthetic", "Rubber", "Metal", "Plastic", "Glass", "Wood", "Fabric"]
+
+# Response model
+class AsyncReportResponse(BaseModel):
     success: bool
-    product_type: str
-    material: str
-    condition_score: int
-    condition_report: str
-    tags: List[str]
+    message: str
+    product_type_job_uri: str = None
+    material_job_uri: str = None
+    tags_job_uri: str = None
     timetaken: float
 
-# ------------------------------------------------------------
-# Root Endpoint
-# ------------------------------------------------------------
-@app.get("/")
-async def root():
-    """
-    Root endpoint for quick health check.
-    """
-    return {"message": "GLUU BLIP2 Hybrid Inference API is running"}
 
-# ------------------------------------------------------------
-# Analyze Images Endpoint
-# ------------------------------------------------------------
-@app.post("/analyze-images", response_model=ReportResponse)
+@app.on_event("startup")
+async def startup_log():
+    logger.info("GLUU BLIP2 Async FastAPI service started.")
+
+
+@app.post("/analyze-images", response_model=AsyncReportResponse)
 async def analyze_images(files: List[UploadFile] = File(...)):
     """
-    Core BLIP2 Product Report API
-    - Accepts uploaded product images
-    - Runs BLIP2 model via SageMaker (or local fallback)
-    - Classifies product type, material, and condition
-    - Generates condition summary report
+    Accepts uploaded images, triggers SageMaker async inference, 
+    and returns S3 URIs where outputs will be written.
     """
-    start_time = time.time()
+    start = time.time()
 
     if not files:
         raise HTTPException(status_code=400, detail="No images uploaded.")
 
-    logger.info(f"Processing {len(files)} uploaded images...")
-
-    # --------------------------------------------------------
-    # Read and Validate Images
-    # --------------------------------------------------------
     images = []
     for file in files:
         try:
@@ -97,77 +83,60 @@ async def analyze_images(files: List[UploadFile] = File(...)):
                 raise ValueError("Image too small for analysis.")
             images.append(img)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid image file: {e}")
 
-    # --------------------------------------------------------
-    # Inference Path Decision
-    # --------------------------------------------------------
-    use_local = os.getenv("LOCAL_BLIP2", "false").lower() == "true" and local_blip_available()
-    inference_type = "local BLIP2" if use_local else "SageMaker"
-    logger.info(f"Using {inference_type} for inference pipeline")
-
-    # --------------------------------------------------------
-    # BLIP2 Inference – Classification & Tag Extraction
-    # --------------------------------------------------------
-    try:
-        product_type = classify_with_sagemaker(images[0], OBJECT_LABELS, "object", use_local=use_local)
-        material = classify_with_sagemaker(images[0], MATERIAL_LABELS, "material", use_local=use_local)
-        logger.info(f"Detected: {product_type=} | {material=}")
-
-        all_tags = set()
-        for img in images:
-            tags = extract_tags_with_sagemaker(img, product_type, use_local=use_local)
-            all_tags.update(tags)
-
-        unique_tags = sorted(all_tags)
-        logger.info(f"Extracted tags: {unique_tags}")
-
-    except Exception as e:
-        logger.exception("BLIP2 inference failed")
-        raise HTTPException(status_code=500, detail=f"BLIP2 inference failed: {e}")
-
-    # --------------------------------------------------------
-    # Condition Scoring & Summarization
-    # --------------------------------------------------------
-    try:
-        condition_score = map_condition_to_score(unique_tags)
-        condition_report = summarize_result(
-            product_type,
-            material,
-            unique_tags,
-            openai_key=os.getenv("OPENAI_API_KEY")
-        )
-    except Exception as e:
-        logger.exception("Condition report generation failed")
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {e}")
-
-    elapsed = round(time.time() - start_time, 2)
-    logger.info(f"Report completed in {elapsed}s")
-
-    # --------------------------------------------------------
-    # Return Structured Response
-    # --------------------------------------------------------
-    return ReportResponse(
-        success=True,
-        product_type=product_type,
-        material=material,
-        condition_score=condition_score,
-        condition_report=condition_report,
-        tags=unique_tags,
-        timetaken=elapsed
+    # Use the first image for product and material classification
+    product_type_job_uri = classify_with_sagemaker(
+        images[0],
+        OBJECT_LABELS,
+        endpoint_name=SAGEMAKER_ENDPOINT,
+        region_name=AWS_REGION,
+        input_bucket=S3_INPUT_BUCKET,
+        output_bucket=S3_OUTPUT_BUCKET,
+        use_local=False
     )
 
-# ------------------------------------------------------------
-# Warmup Event (Optional)
-# ------------------------------------------------------------
-@app.on_event("startup")
-async def warmup_model():
+    material_job_uri = classify_with_sagemaker(
+        images[0],
+        MATERIAL_LABELS,
+        endpoint_name=SAGEMAKER_ENDPOINT,
+        region_name=AWS_REGION,
+        input_bucket=S3_INPUT_BUCKET,
+        output_bucket=S3_OUTPUT_BUCKET,
+        use_local=False
+    )
+
+    # Tag extraction (async)
+    tags_job_uri = extract_tags_with_sagemaker(
+        images[0],
+        "Shoe",  # placeholder; in production, use actual product_type result if synchronous
+        endpoint_name=SAGEMAKER_ENDPOINT,
+        region_name=AWS_REGION,
+        input_bucket=S3_INPUT_BUCKET,
+        output_bucket=S3_OUTPUT_BUCKET,
+        use_local=False
+    )
+
+    elapsed = round(time.time() - start, 2)
+
+    return AsyncReportResponse(
+        success=True,
+        message="Async inference jobs submitted successfully. Retrieve results from S3 output URIs.",
+        product_type_job_uri=product_type_job_uri,
+        material_job_uri=material_job_uri,
+        tags_job_uri=tags_job_uri,
+        timetaken=elapsed,
+    )
+
+
+@app.get("/status")
+def get_status():
     """
-    Optional warmup on API startup to reduce cold-start latency.
+    Simple health check endpoint.
     """
-    try:
-        dummy_img = Image.new("RGB", (224, 224), color=(255, 255, 255))
-        classify_with_sagemaker(dummy_img, OBJECT_LABELS, "object", use_local=False)
-        logger.info("Warmup inference completed successfully.")
-    except Exception as e:
-        logger.warning(f"Warmup failed: {e}")
+    return {"status": "running", "endpoint": SAGEMAKER_ENDPOINT, "region": AWS_REGION}
+
+
+@app.get("/")
+def root():
+    return {"message": "GLUU BLIP2 Async Inference API is live"}
