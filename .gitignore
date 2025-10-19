@@ -1,0 +1,83 @@
+# ---------------------------
+# GLUU BLIP2 ASYNC API PROJECT
+# ---------------------------
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temp files
+*.log
+*.out
+*.tmp
+*.bak
+nohup.out
+
+# AWS / credentials
+*.pem
+*.key
+.aws/
+*.csv
+
+# SageMaker local outputs
+*.jsonl
+*.ckpt
+*.bin
+*.pth
+sagemaker-local-output/
+model.tar.gz
+
+# Docker build files
+build/
+dist/
+*.egg-info/
+docker-compose.override.yml
+.dockerignore
+
+# Node / frontend (if used with Supabase Edge or dashboard)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE settings
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS / system junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+pip-wheel-metadata/
+__pypackages__/
+
+# Test / coverage artifacts
+.coverage
+.tox/
+.nox/
+pytest_cache/
+.pytest_cache/
+coverage.xml
+
+# GitHub / CI
+.github/
+!.github/workflows/
+*.code-workspace
+
+# Postman artifacts
+postman/*.tmp
+postman/environments/*.local.json
