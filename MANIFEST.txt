@@ -1,0 +1,84 @@
+GLUU BLIP2 Hybrid Inference Backend - Manifest
+==================================================
+
+This archive contains all files required for the hybrid FastAPI backend integrating
+SageMaker inference, local tagging logic, and OpenAI summarization, following the
+GLUU BLIP2 Product Summary Inference Architecture.
+
+Directory Structure
+-------------------
+gluu-blip2-hybrid-backend/
+│
+├── app.py
+│     → Core FastAPI app implementing BLIP2 execution and Product Report API.
+│
+├── sagemaker_inference.py
+│     → Handles calls to SageMaker endpoint for BLIP2 inference and local fallback.
+│
+├── tag_logic.py
+│     → Defines product/material label lists, condition tags, and scoring rules.
+│
+├── summarizer.py
+│     → Uses OpenAI GPT model to generate natural language condition summaries.
+│
+├── test_local.py
+│     → Local CLI testing script to send sample images to /analyze-images.
+│
+├── requirements.txt
+│     → Python dependencies for FastAPI backend and inference components.
+│
+├── Dockerfile
+│     → Container definition for deployment to AWS ECS.
+│
+├── .env.example
+│     → Template for environment variables (no secrets committed).
+│
+├── secretsmanager_setup.sh
+│     → Script to create/update AWS Secrets Manager entry for backend credentials.
+│
+├── postman/
+│   ├── GLUU_BLIP2_API_Tests.postman_collection.json
+│   │     → Postman collection for health check and /analyze-images tests.
+│   ├── Local.postman_environment.json
+│   │     → Environment file for local FastAPI testing.
+│   └── AWS.postman_environment.json
+│         → Environment file for deployed ECS/ALB endpoint testing.
+│
+├── README.md
+│     → Full project overview, setup instructions, and deployment guide.
+│
+├── MANIFEST.txt
+│     → This file – describes contents and project structure.
+│
+├── .github/workflows/deploy.yml
+│     → GitHub Actions CI/CD pipeline: builds Docker image, pushes to ECR, redeploys ECS service.
+│
+└── docs/
+    ├── GLUU - BLIP2 Product Summary Inference Architecture & Deployment Document.pdf
+    ├── ProjectHandoffDocument_Team6_Week10_Draft.pdf
+    ├── Updated Potential Tasks.pdf
+    └── README_REFERENCE.txt
+
+Usage Summary
+-------------
+1. Local testing:
+   - Copy .env.example to .env and fill in credentials.
+   - Run `uvicorn app:app --reload --port 8080`
+   - Use Postman (Local environment) or `python test_local.py` to verify endpoints.
+
+2. Deployment:
+   - Push to `main` branch in the Gluu organization GitHub repo.
+   - CI/CD builds Docker image, pushes to AWS ECR, and redeploys ECS service.
+   - Secrets automatically pulled from AWS Secrets Manager.
+
+3. Postman Testing:
+   - Import the collection and environments under /postman/ into Postman.
+   - Switch between Local and AWS environments to test both deployments.
+
+Maintainers
+------------
+- Project: GLUU BLIP2 Hybrid Inference Backend
+- Author: Team 6 (Capella University)
+- Maintainer: Joel Palmateer
+- Organization: Gluu Dev Team GitHub
+- Last Updated: October 2025
