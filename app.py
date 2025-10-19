@@ -1,6 +1,6 @@
 # app.py
 # ============================================================
-# GLUU Hybrid FastAPI Backend - BLIP2 Core Logic & Product Report API
+# GLUU Hybrid FastAPI Backend - BLIP2 Core Logic & Async Product Report API
 # ============================================================
 
 import os, io, time, json, logging
@@ -10,12 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
 from dotenv import load_dotenv
-import boto3
 
 # Load environment variables
 load_dotenv()
 
-# Import local inference helpers
+# Local imports
 from sagemaker_inference import (
     classify_with_sagemaker,
     extract_tags_with_sagemaker,
@@ -23,8 +22,10 @@ from sagemaker_inference import (
 )
 from tag_logic import PRODUCT_TAGS
 
-# FastAPI setup
-app = FastAPI(title="GLUU BLIP2 Async Inference API", version="2.0")
+# ------------------------------------------------------------
+# FastAPI Setup
+# ------------------------------------------------------------
+app = FastAPI(title="GLUU BLIP2 Async Inference API", version="2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,21 +35,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Logging setup
+# ------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gluu-blip2")
 
-# Environment variables
+# ------------------------------------------------------------
+# Environment Variables
+# ------------------------------------------------------------
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 SAGEMAKER_ENDPOINT = os.getenv("SAGEMAKER_ENDPOINT_NAME", "")
-S3_INPUT_BUCKET = os.getenv("S3_INPUT_BUCKET", "")
-S3_OUTPUT_BUCKET = os.getenv("S3_OUTPUT_BUCKET", "")
+S3_BUCKET = os.getenv("S3_BUCKET", "gluu-project")
+S3_INPUT_PREFIX = os.getenv("S3_INPUT_PREFIX", "input/")
+S3_OUTPUT_PREFIX = os.getenv("S3_OUTPUT_PREFIX", "output/")
 
-# Classes and tags
+# ------------------------------------------------------------
+# Label Definitions
+# ------------------------------------------------------------
 OBJECT_LABELS = ["Shoe", "Watch", "Wallet", "Bag", "Purse", "Glasses", "Hat", "Phone", "Jacket", "Belt"]
 MATERIAL_LABELS = ["Leather", "Canvas", "Suede", "Synthetic", "Rubber", "Metal", "Plastic", "Glass", "Wood", "Fabric"]
 
-# Response model
+# ------------------------------------------------------------
+# Response Model
+# ------------------------------------------------------------
 class AsyncReportResponse(BaseModel):
     success: bool
     message: str
@@ -58,16 +68,22 @@ class AsyncReportResponse(BaseModel):
     timetaken: float
 
 
+# ------------------------------------------------------------
+# Startup Event
+# ------------------------------------------------------------
 @app.on_event("startup")
 async def startup_log():
-    logger.info("GLUU BLIP2 Async FastAPI service started.")
+    logger.info("✅ GLUU BLIP2 Async FastAPI service started and ready for inference.")
 
 
+# ------------------------------------------------------------
+# Analyze Images Endpoint
+# ------------------------------------------------------------
 @app.post("/analyze-images", response_model=AsyncReportResponse)
 async def analyze_images(files: List[UploadFile] = File(...)):
     """
-    Accepts uploaded images, triggers SageMaker async inference, 
-    and returns S3 URIs where outputs will be written.
+    Accept uploaded images, trigger SageMaker async inference,
+    and return the S3 URIs where results will appear.
     """
     start = time.time()
 
@@ -75,3 +91,38 @@ async def analyze_images(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=400, detail="No images uploaded.")
 
     images = []
+    for file in files:
+        try:
+            contents = await file.read()
+            image = Image.open(io.BytesIO(contents)).convert("RGB")
+            images.append(image)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
+
+    # Use first image for classification & tagging
+    image = images[0]
+
+    try:
+        product_type_uri = classify_with_sagemaker(image, OBJECT_LABELS, SAGEMAKER_ENDPOINT)
+        material_uri = classify_with_sagemaker(image, MATERIAL_LABELS, SAGEMAKER_ENDPOINT)
+        tags_uri = extract_tags_with_sagemaker(image, "Generic", SAGEMAKER_ENDPOINT)
+
+        logger.info(f"🧠 Async Jobs Submitted:\n"
+                    f"  Product Type → {product_type_uri}\n"
+                    f"  Material → {material_uri}\n"
+                    f"  Tags → {tags_uri}")
+
+        elapsed = round(time.time() - start, 2)
+
+        return AsyncReportResponse(
+            success=True,
+            message="Async inference jobs submitted successfully.",
+            product_type_job_uri=product_type_uri,
+            material_job_uri=material_uri,
+            tags_job_uri=tags_uri,
+            timetaken=elapsed
+        )
+
+    except Exception as e:
+        logger.exception("❌ Failed to submit SageMaker async inference job.")
+        raise HTTPException(status_code=500, detail=str(e))
