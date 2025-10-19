@@ -81,3 +81,7 @@ coverage.xml
 # Postman artifacts
 postman/*.tmp
 postman/environments/*.local.json
+
+# Allow workflow YAML files
+!.github/workflows/*.yml
+!.github/workflows/*.yaml
